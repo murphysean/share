@@ -7,16 +7,20 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
 	"regexp"
+	"runtime"
 	"strings"
 
+	"code.google.com/p/go-uuid/uuid"
 	"github.com/AaronO/go-git-http"
-	"github.com/murphysean/share/advancedhttp"
+	"github.com/murphysean/advhttp"
+	"github.com/murphysean/share/extn"
 )
 
 const (
@@ -34,7 +38,7 @@ const (
 	DEFAULT_FLAG_USERNAME   = ""
 	DEFAULT_FLAG_PASSWORD   = ""
 
-	VERSION = "1.0.0"
+	VERSION = "1.1.0"
 )
 
 var (
@@ -201,20 +205,14 @@ func main() {
 	middleman.git = githandler
 	http.Handle("/", middleman)
 
-	http.HandleFunc("/upload.html", func(w http.ResponseWriter, r *http.Request) {
-		rww := &advancedhttp.ResponseWriter{w, false, true, "", 0, http.StatusOK}
-		defer rww.Log(r, "")
-		if r.Method == "GET" {
-			fmt.Fprintf(rww, `<html><title>Upload</title><body><form action="/" method="post" enctype="multipart/form-data"><label for="file">Filenames:</label><input id="file" type="file" name="file" multiple><input type="submit" name="submit" value="Submit"></form></body></html>`)
-		}
-	})
-
 	fmt.Fprintln(os.Stderr, "Share Server\tVersion "+VERSION)
-	if *httpsPort == DEFAULT_FLAG_HTTPS_PORT {
-		fmt.Fprintln(os.Stderr, "Serving http on:")
-	} else {
-		fmt.Fprintln(os.Stderr, "Serving https on:")
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	fmt.Fprintf(os.Stderr, "GOMAXPROCS=%v\n", runtime.NumCPU())
+	serverProtocol := "http"
+	if *httpsPort != DEFAULT_FLAG_HTTPS_PORT {
+		serverProtocol = "https"
 	}
+	fmt.Fprintln(os.Stderr, "Serving "+serverProtocol+" on:")
 	fmt.Fprintln(os.Stderr, "\thost\t"+net.JoinHostPort(hostname, port))
 	out, err := exec.Command("ip", "-4", "addr", "show").Output()
 	if err == nil {
@@ -226,13 +224,24 @@ func main() {
 			}
 		}
 	}
+
+	if *username != "" && *password != "" {
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "User/Pass Required:")
+		fmt.Fprintln(os.Stderr, "\tUsername: "+*username)
+		fmt.Fprintln(os.Stderr, "\tPassword: "+*password)
+		fmt.Fprintln(os.Stderr, "\tcurl -u "+*username+":"+*password)
+	}
+
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprintln(os.Stderr, "Files can be uploaded via curl or html:")
-	fmt.Fprintln(os.Stderr, "\tcurl --form \"file=@filename.txt\" "+net.JoinHostPort(hostname, port))
+	fmt.Fprintln(os.Stderr, "Files can be uploaded:")
+	fmt.Fprintln(os.Stderr, "\tcurl --form \"file=@filename.txt\" "+serverProtocol+"://"+net.JoinHostPort(hostname, port)+"/")
+	fmt.Fprintln(os.Stderr, "\tcurl --data \"file=@filename.txt\" -H \"Content-Type: text/plain\" "+serverProtocol+"://"+net.JoinHostPort(hostname, port)+"/")
+	fmt.Fprintln(os.Stderr, "\tcurl -X PUT --data @filename.txt "+serverProtocol+"://"+net.JoinHostPort(hostname, port)+"/filename.txt")
 	fmt.Fprintln(os.Stderr, "\tvisit /upload.html")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "If the directory is a git repository (working or bare):")
-	fmt.Fprintln(os.Stderr, "\tgit clone http(s)://"+net.JoinHostPort(hostname, port))
+	fmt.Fprintln(os.Stderr, "\tgit clone "+serverProtocol+"://"+net.JoinHostPort(hostname, port))
 	fmt.Fprintln(os.Stderr, "\tThere is also support for git push")
 	fmt.Fprintln(os.Stderr, "\tgit push")
 	fmt.Fprintln(os.Stderr, "")
@@ -258,9 +267,16 @@ type Middle struct {
 	git  http.Handler
 }
 
+func logApache(w *advhttp.ResponseWriter, r *http.Request) {
+	log.Println(advhttp.LogApache(w, r))
+}
+
 func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	rww := &advancedhttp.ResponseWriter{w, false, true, "", 0, http.StatusOK}
-	defer rww.Log(r, "")
+	rww := advhttp.NewResponseWriter(w)
+	//Put in a header that says this was share that served the content
+	rww.Header().Set("Server", "Share/"+VERSION)
+	rww.Header().Set("X-Powered-By", runtime.Version())
+	defer logApache(rww, r)
 
 	//If username and password required, check for credentials from the user, and prompt for them if not provided
 	if *username != "" && *password != "" {
@@ -270,11 +286,17 @@ func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.Error(rww, "Not Authorized", http.StatusUnauthorized)
 				return
 			}
+			r.Header.Set("User-Id", u)
 		} else {
 			rww.Header().Set("WWW-Authenticate", `Basic realm="share"`)
 			http.Error(rww, "Not Authorized", http.StatusUnauthorized)
 			return
 		}
+	}
+
+	if r.Method == "GET" && r.URL.Path == "/upload.html" {
+		fmt.Fprintf(rww, `<html><title>Upload</title><body><form action="/" method="post" enctype="multipart/form-data"><label for="file">Filenames:</label><input id="file" type="file" name="file" multiple><input type="submit" name="submit" value="Submit"></form></body></html>`)
+		return
 	}
 
 	//See if this is a git request
@@ -285,44 +307,100 @@ func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == "POST" {
 		if !strings.HasSuffix(r.URL.Path, "/") {
-			http.Error(rww, "POST is allowed on directories only", http.StatusBadRequest)
+			http.Error(rww, "POST is allowed on directories only", http.StatusNotFound)
 			return
 		}
-
 		var successString string = ""
-		reader, err := r.MultipartReader()
-		if err != nil {
-			http.Error(rww, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		for {
-			part, err := reader.NextPart()
-			if err == io.EOF {
-				break
-			}
+		if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err == nil && mt == "multipart/form-data" {
+			os.MkdirAll(path[:len(path)-1]+r.URL.Path, 0775)
+			reader, err := r.MultipartReader()
 			if err != nil {
 				http.Error(rww, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			if part.FileName() != "" {
-				file, err := os.Create(path[:len(path)-1] + r.URL.Path + part.FileName())
-				defer file.Close()
+			for {
+				part, err := reader.NextPart()
+				if err == io.EOF {
+					break
+				}
 				if err != nil {
 					http.Error(rww, err.Error(), http.StatusInternalServerError)
 					return
 				}
+				if part.FileName() != "" {
+					os.MkdirAll(path[:len(path)-1]+r.URL.Path, 0775)
+					file, err := os.Create(path[:len(path)-1] + r.URL.Path + part.FileName())
+					if err != nil {
+						http.Error(rww, err.Error(), http.StatusInternalServerError)
+						return
+					}
+					defer file.Close()
 
-				size, err := io.Copy(file, part)
+					size, err := io.Copy(file, part)
+					if err != nil {
+						http.Error(rww, err.Error(), http.StatusInternalServerError)
+						return
+					}
+					rww.Header().Add("Location", r.URL.Path+part.FileName())
+					successString += fmt.Sprintf("Created: %v, Size: %v bytes\n", part.FileName(), size)
+				}
+				part.Close()
+			}
+		} else {
+			if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err == nil && mt != "" {
+				os.MkdirAll(path[:len(path)-1]+r.URL.Path, 0775)
+				extension := extn.GetExtensionForMime(mt)
+				if extension == "" {
+					http.Error(rww, "Content-Type not Understood", http.StatusUnsupportedMediaType)
+					return
+				}
+				filename := uuid.New() + extension
+				file, err := os.Create(path[:len(path)-1] + r.URL.Path + filename)
 				if err != nil {
 					http.Error(rww, err.Error(), http.StatusInternalServerError)
 					return
 				}
-				successString += fmt.Sprintf("Created: %v, Size: %v bytes\n", part.FileName(), size)
+				defer file.Close()
+
+				size, err := io.Copy(file, r.Body)
+				if err != nil {
+					http.Error(rww, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				rww.Header().Set("Location", r.URL.Path+filename)
+				successString = fmt.Sprintf("Created: %v, Size: %v bytes\n", filename, size)
+			} else {
+				http.Error(rww, "Need a valid Content-Type header", http.StatusUnsupportedMediaType)
+				return
 			}
-			part.Close()
 		}
 		rww.WriteHeader(http.StatusCreated)
 		rww.Write([]byte(successString))
+		return
+	}
+
+	if r.Method == "PUT" {
+		if strings.HasSuffix(r.URL.Path, "/") {
+			http.Error(rww, "PUT is allowed on files only", http.StatusNotFound)
+			return
+		}
+		//Need to strip the file off the path
+		os.MkdirAll(path[:len(path)-1]+r.URL.Path[:strings.LastIndex(r.URL.Path, "/")+1], 0775)
+
+		file, err := os.Create(path[:len(path)-1] + r.URL.Path)
+		if err != nil {
+			http.Error(rww, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer file.Close()
+
+		_, err = io.Copy(file, r.Body)
+		if err != nil {
+			http.Error(rww, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		rww.WriteHeader(http.StatusCreated)
 		return
 	}
 
