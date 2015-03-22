@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
 	"regexp"
 	"strings"
 
@@ -19,30 +20,33 @@ import (
 )
 
 const (
-	ENVIRONMENT_VAR_HTTP_PORT      = "HTTP_PORT"
-	ENVIRONMENT_VAR_HTTPS_PORT     = "HTTPS_PORT"
-	ENVIRONMENT_VAR_CERT_PATH      = "CERT_PATH"
-	ENVIRONMENT_VAR_KEY_PATH       = "KEY_PATH"
-	ENVIRONMENT_VAR_SHARE_USERNAME = "SHARE_USERNAME"
-	ENVIRONMENT_VAR_SHARE_PASSWORD = "SHARE_PASSWORD"
-	DEFAULT_FLAG_HTTP_PORT         = "0"
-	DEFAULT_FLAG_HTTPS_PORT        = ""
-	DEFAULT_FLAG_CERT_PATH         = "cert.pem"
-	DEFAULT_FLAG_KEY_PATH          = "key.pem"
-	DEFAULT_FLAG_SHARE_USERNAME    = ""
-	DEFAULT_FLAG_SHARE_PASSWORD    = ""
+	ENVIRONMENT_VAR_HTTP_PORT  = "SHARE_HTTP_PORT"
+	ENVIRONMENT_VAR_HTTPS_PORT = "SHARE_HTTPS_PORT"
+	ENVIRONMENT_VAR_CERT_PATH  = "SHARE_CERT_PATH"
+	ENVIRONMENT_VAR_KEY_PATH   = "SHARE_KEY_PATH"
+	ENVIRONMENT_VAR_USERNAME   = "SHARE_USERNAME"
+	ENVIRONMENT_VAR_PASSWORD   = "SHARE_PASSWORD"
+
+	DEFAULT_FLAG_HTTP_PORT  = "0"
+	DEFAULT_FLAG_HTTPS_PORT = ""
+	DEFAULT_FLAG_CERT_PATH  = "cert.pem"
+	DEFAULT_FLAG_KEY_PATH   = "key.pem"
+	DEFAULT_FLAG_USERNAME   = ""
+	DEFAULT_FLAG_PASSWORD   = ""
+
+	VERSION = "1.0.0"
 )
 
 var (
 	host      = ""
 	port      = ""
 	path      = ""
-	httpPort  = flag.String("http", DEFAULT_FLAG_HTTP_PORT, "Specify the listening port for HTTP traffic")
-	httpsPort = flag.String("https", DEFAULT_FLAG_HTTPS_PORT, "Specify the listening port for HTTPS traffic")
+	httpPort  = flag.String("http", DEFAULT_FLAG_HTTP_PORT, "Specify the listening port for HTTP traffic. 0 = system assigned.")
+	httpsPort = flag.String("https", DEFAULT_FLAG_HTTPS_PORT, "Specify the listening port for HTTPS traffic. 0 = system assigned.")
 	certPath  = flag.String("cert", DEFAULT_FLAG_CERT_PATH, "Specify the path to the cert file")
 	keyPath   = flag.String("key", DEFAULT_FLAG_KEY_PATH, "Specify the path to the key file")
-	username  = flag.String("username", DEFAULT_FLAG_SHARE_USERNAME, "Set a required username for requesting clients")
-	password  = flag.String("password", DEFAULT_FLAG_SHARE_PASSWORD, "Set a required password for requesting clients")
+	username  = flag.String("username", DEFAULT_FLAG_USERNAME, "Set a required username for requesting clients")
+	password  = flag.String("password", DEFAULT_FLAG_PASSWORD, "Set a required password for requesting clients")
 )
 
 func init() {
@@ -52,59 +56,39 @@ func init() {
 func main() {
 	var err error
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage of %s v%s:\n", os.Args[0], VERSION)
 		fmt.Fprintln(os.Stderr, "share [-h] [-p|-http <http-port>] [-https <https-port>]")
 		fmt.Fprintln(os.Stderr, "\t[-cert <path-to-pem>] [-key <path-to-pem>]")
 		fmt.Fprintln(os.Stderr, "\t[-username <username>] [-password <password>]")
-		fmt.Fprintln(os.Stderr, "\t[directory path]")
+		fmt.Fprintln(os.Stderr, "\t[directory path|'help']")
+		fmt.Fprintln(os.Stderr, "")
 		flag.PrintDefaults()
 
-		fmt.Fprintf(os.Stderr, "type help for help\n")
-		fmt.Fprintf(os.Stderr, "As an alternative to flags, use the environment variables %s, %s, %s, %s, %s and %s\n",
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintf(os.Stderr, "As an alternative to flags, use the environment variables \n\t%s\n\t%s\n\t%s\n\t%s\n\t%s\n\t%s\n",
 			[]interface{}{ENVIRONMENT_VAR_HTTP_PORT, ENVIRONMENT_VAR_HTTPS_PORT,
 				ENVIRONMENT_VAR_CERT_PATH, ENVIRONMENT_VAR_KEY_PATH,
-				ENVIRONMENT_VAR_SHARE_USERNAME, ENVIRONMENT_VAR_SHARE_PASSWORD})
-		fmt.Fprintf(os.Stderr, "You can also keep these environment variables in a file called .share in your directory to persist the configuration\n")
+				ENVIRONMENT_VAR_USERNAME, ENVIRONMENT_VAR_PASSWORD}...)
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "You can also keep these environment variables in a file called")
+		fmt.Fprintln(os.Stderr, "\t.share in your home directory, and/or the directory in which")
+		fmt.Fprintln(os.Stderr, "\tyou plan to run share to persist the configuration.")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "Want to serve via https? Create your certificate:")
+		fmt.Fprintln(os.Stderr, "---")
+		fmt.Fprintln(os.Stderr, "openssl req -newkey rsa:2048 -new -nodes -x509 -days 3650 -keyout key.pem -out cert.pem")
+		fmt.Fprintln(os.Stderr, "---")
+		fmt.Fprintln(os.Stderr, "\tPut them in a directory other than the one you are sharing")
+		fmt.Fprintln(os.Stderr, "\tUse the -key and -cert command line flags to tell share where they are")
+		fmt.Fprintln(os.Stderr, "\tStart share and specify an https port using the options above")
+		fmt.Fprintln(os.Stderr, "")
+		fmt.Fprintln(os.Stderr, "To Serve a git repository directory over http:")
+		fmt.Fprintln(os.Stderr, "\tmv hooks/post-update.sample hooks/post-update")
+		fmt.Fprintln(os.Stderr, "\tchmod a+x hooks/post-update")
+		fmt.Fprintln(os.Stderr, "\tgit update-server-info")
 	}
 	flag.Parse()
 	log.SetFlags(0)
-
-	//Look for a config file in the home directory, or in the current directory for config (current dir overrides)
-	config := readConfig(path + ".share")
-
-	//Look for env variables
-	if *httpPort == DEFAULT_FLAG_HTTP_PORT && os.Getenv(ENVIRONMENT_VAR_HTTP_PORT) != "" {
-		flag.Set("http", os.Getenv(ENVIRONMENT_VAR_HTTP_PORT))
-	} else if *httpPort == DEFAULT_FLAG_HTTP_PORT && config[ENVIRONMENT_VAR_HTTP_PORT] != "" {
-		flag.Set("http", config[ENVIRONMENT_VAR_HTTP_PORT])
-	}
-	if *httpsPort == DEFAULT_FLAG_HTTPS_PORT && os.Getenv(ENVIRONMENT_VAR_HTTPS_PORT) != "" {
-		flag.Set("https", os.Getenv(ENVIRONMENT_VAR_HTTPS_PORT))
-	} else if *httpsPort == DEFAULT_FLAG_HTTPS_PORT && config[ENVIRONMENT_VAR_HTTPS_PORT] != "" {
-		flag.Set("https", config[ENVIRONMENT_VAR_HTTPS_PORT])
-	}
-	if *certPath == DEFAULT_FLAG_CERT_PATH && os.Getenv(ENVIRONMENT_VAR_CERT_PATH) != "" {
-		flag.Set("cert", os.Getenv(ENVIRONMENT_VAR_CERT_PATH))
-	} else if *certPath == DEFAULT_FLAG_CERT_PATH && config[ENVIRONMENT_VAR_CERT_PATH] != "" {
-		flag.Set("cert", config[ENVIRONMENT_VAR_CERT_PATH])
-	}
-	if *keyPath == DEFAULT_FLAG_KEY_PATH && os.Getenv(ENVIRONMENT_VAR_KEY_PATH) != "" {
-		flag.Set("key", os.Getenv(ENVIRONMENT_VAR_KEY_PATH))
-	} else if *keyPath == DEFAULT_FLAG_KEY_PATH && config[ENVIRONMENT_VAR_KEY_PATH] != "" {
-		flag.Set("key", config[ENVIRONMENT_VAR_KEY_PATH])
-	}
-
-	//Allow user/pass params to semi-secure requests
-	if *username == DEFAULT_FLAG_SHARE_USERNAME && os.Getenv(ENVIRONMENT_VAR_SHARE_USERNAME) != "" {
-		flag.Set("username", os.Getenv(ENVIRONMENT_VAR_SHARE_USERNAME))
-	} else if *username == DEFAULT_FLAG_SHARE_USERNAME && config[ENVIRONMENT_VAR_SHARE_USERNAME] != "" {
-		flag.Set("username", config[ENVIRONMENT_VAR_SHARE_USERNAME])
-	}
-	if *password == DEFAULT_FLAG_SHARE_PASSWORD && os.Getenv(ENVIRONMENT_VAR_SHARE_PASSWORD) != "" {
-		flag.Set("password", os.Getenv(ENVIRONMENT_VAR_SHARE_PASSWORD))
-	} else if *password == DEFAULT_FLAG_SHARE_PASSWORD && config[ENVIRONMENT_VAR_SHARE_PASSWORD] != "" {
-		flag.Set("password", config[ENVIRONMENT_VAR_SHARE_PASSWORD])
-	}
 
 	if flag.Arg(0) == "help" {
 		flag.Usage()
@@ -135,6 +119,53 @@ func main() {
 	}
 
 	fmt.Println("Sharing:", path)
+
+	//Look for a config file in the home directory, or in the current directory for config (current dir overrides)
+	config := make(map[string]string)
+	//Start with the home directory config
+	if usr, err := user.Current(); err == nil {
+		if _, err := os.Stat(usr.HomeDir + "/.share"); !os.IsNotExist(err) {
+			config = readConfig(config, usr.HomeDir+"/.share")
+		}
+	}
+	//Now load overtop the path's config
+	if _, err := os.Stat(path + ".share"); !os.IsNotExist(err) {
+		config = readConfig(config, path+".share")
+	}
+
+	//Look for env variables
+	if *httpPort == DEFAULT_FLAG_HTTP_PORT && os.Getenv(ENVIRONMENT_VAR_HTTP_PORT) != "" {
+		flag.Set("http", os.Getenv(ENVIRONMENT_VAR_HTTP_PORT))
+	} else if *httpPort == DEFAULT_FLAG_HTTP_PORT && config[ENVIRONMENT_VAR_HTTP_PORT] != "" {
+		flag.Set("http", config[ENVIRONMENT_VAR_HTTP_PORT])
+	}
+	if *httpsPort == DEFAULT_FLAG_HTTPS_PORT && os.Getenv(ENVIRONMENT_VAR_HTTPS_PORT) != "" {
+		flag.Set("https", os.Getenv(ENVIRONMENT_VAR_HTTPS_PORT))
+	} else if *httpsPort == DEFAULT_FLAG_HTTPS_PORT && config[ENVIRONMENT_VAR_HTTPS_PORT] != "" {
+		flag.Set("https", config[ENVIRONMENT_VAR_HTTPS_PORT])
+	}
+	if *certPath == DEFAULT_FLAG_CERT_PATH && os.Getenv(ENVIRONMENT_VAR_CERT_PATH) != "" {
+		flag.Set("cert", os.Getenv(ENVIRONMENT_VAR_CERT_PATH))
+	} else if *certPath == DEFAULT_FLAG_CERT_PATH && config[ENVIRONMENT_VAR_CERT_PATH] != "" {
+		flag.Set("cert", config[ENVIRONMENT_VAR_CERT_PATH])
+	}
+	if *keyPath == DEFAULT_FLAG_KEY_PATH && os.Getenv(ENVIRONMENT_VAR_KEY_PATH) != "" {
+		flag.Set("key", os.Getenv(ENVIRONMENT_VAR_KEY_PATH))
+	} else if *keyPath == DEFAULT_FLAG_KEY_PATH && config[ENVIRONMENT_VAR_KEY_PATH] != "" {
+		flag.Set("key", config[ENVIRONMENT_VAR_KEY_PATH])
+	}
+
+	//Allow user/pass params to semi-secure requests
+	if *username == DEFAULT_FLAG_USERNAME && os.Getenv(ENVIRONMENT_VAR_USERNAME) != "" {
+		flag.Set("username", os.Getenv(ENVIRONMENT_VAR_USERNAME))
+	} else if *username == DEFAULT_FLAG_USERNAME && config[ENVIRONMENT_VAR_USERNAME] != "" {
+		flag.Set("username", config[ENVIRONMENT_VAR_USERNAME])
+	}
+	if *password == DEFAULT_FLAG_PASSWORD && os.Getenv(ENVIRONMENT_VAR_PASSWORD) != "" {
+		flag.Set("password", os.Getenv(ENVIRONMENT_VAR_PASSWORD))
+	} else if *password == DEFAULT_FLAG_PASSWORD && config[ENVIRONMENT_VAR_PASSWORD] != "" {
+		flag.Set("password", config[ENVIRONMENT_VAR_PASSWORD])
+	}
 
 	//Get the Hostname of the machine
 	hostname, err := os.Hostname()
@@ -178,7 +209,12 @@ func main() {
 		}
 	})
 
-	fmt.Fprintln(os.Stderr, "Serving on:")
+	fmt.Fprintln(os.Stderr, "Share Server\tVersion "+VERSION)
+	if *httpsPort == DEFAULT_FLAG_HTTPS_PORT {
+		fmt.Fprintln(os.Stderr, "Serving http on:")
+	} else {
+		fmt.Fprintln(os.Stderr, "Serving https on:")
+	}
 	fmt.Fprintln(os.Stderr, "\thost\t"+net.JoinHostPort(hostname, port))
 	out, err := exec.Command("ip", "-4", "addr", "show").Output()
 	if err == nil {
@@ -190,19 +226,16 @@ func main() {
 			}
 		}
 	}
-	fmt.Fprintln(os.Stderr, "To Serve a git repository:")
-	fmt.Fprintln(os.Stderr, "\tmv hooks/post-update.sample hooks/post-update")
-	fmt.Fprintln(os.Stderr, "\tchmod a+x hooks/post-update")
-	fmt.Fprintln(os.Stderr, "\tgit update-server-info")
+	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Files can be uploaded via curl or html:")
-	fmt.Fprintln(os.Stderr, "\tcurl --form \"file=@filename.txt\" "+net.JoinHostPort(hostname, *httpPort))
+	fmt.Fprintln(os.Stderr, "\tcurl --form \"file=@filename.txt\" "+net.JoinHostPort(hostname, port))
 	fmt.Fprintln(os.Stderr, "\tvisit /upload.html")
-	if *httpsPort == DEFAULT_FLAG_HTTPS_PORT {
-		fmt.Fprintln(os.Stderr, "Want to serve via https? Create your certificate")
-		fmt.Fprintln(os.Stderr, "\topenssl req -newkey rsa:2048 -new -nodes -x509 -days 3650 -keyout key.pem -out cert.pem")
-		fmt.Fprintln(os.Stderr, "\tPut them in a directory other than the one you are sharing")
-		fmt.Fprintln(os.Stderr, "\tUse the -key and -cert command line flags to tell share where they are")
-	}
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "If the directory is a git repository (working or bare):")
+	fmt.Fprintln(os.Stderr, "\tgit clone http(s)://"+net.JoinHostPort(hostname, port))
+	fmt.Fprintln(os.Stderr, "\tThere is also support for git push")
+	fmt.Fprintln(os.Stderr, "\tgit push")
+	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Press ctrl-c to stop sharing")
 
 	if *httpsPort != DEFAULT_FLAG_HTTPS_PORT {
@@ -319,8 +352,8 @@ func isGitRequest(path string) bool {
 	return false
 }
 
-func readConfig(path string) (ret map[string]string) {
-	ret = make(map[string]string)
+func readConfig(inconfig map[string]string, path string) (ret map[string]string) {
+	ret = inconfig
 	file, err := os.Open(path)
 	if err != nil {
 		return
