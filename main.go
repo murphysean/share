@@ -1,7 +1,9 @@
 package main
 
 import (
+	"archive/tar"
 	"bufio"
+	"compress/gzip"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -38,7 +41,7 @@ const (
 	DEFAULT_FLAG_USERNAME   = ""
 	DEFAULT_FLAG_PASSWORD   = ""
 
-	VERSION = "1.1.0"
+	VERSION = "1.2.0"
 )
 
 var (
@@ -61,7 +64,7 @@ func main() {
 	var err error
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of %s v%s:\n", os.Args[0], VERSION)
-		fmt.Fprintln(os.Stderr, "share [-h] [-p|-http <http-port>] [-https <https-port>]")
+		fmt.Fprintln(os.Stderr, "share [-p|-http <http-port>] [-https <https-port>]")
 		fmt.Fprintln(os.Stderr, "\t[-cert <path-to-pem>] [-key <path-to-pem>]")
 		fmt.Fprintln(os.Stderr, "\t[-username <username>] [-password <password>]")
 		fmt.Fprintln(os.Stderr, "\t[directory path|'help']")
@@ -128,13 +131,13 @@ func main() {
 	config := make(map[string]string)
 	//Start with the home directory config
 	if usr, err := user.Current(); err == nil {
-		if _, err := os.Stat(usr.HomeDir + "/.share"); !os.IsNotExist(err) {
-			config = readConfig(config, usr.HomeDir+"/.share")
+		if _, err := os.Stat(filepath.Join(usr.HomeDir, "/.share")); !os.IsNotExist(err) {
+			config = readConfig(config, filepath.Join(usr.HomeDir, "/.share"))
 		}
 	}
 	//Now load overtop the path's config
-	if _, err := os.Stat(path + ".share"); !os.IsNotExist(err) {
-		config = readConfig(config, path+".share")
+	if _, err = os.Stat(filepath.Join(path, "/.share")); !os.IsNotExist(err) {
+		config = readConfig(config, filepath.Join(path+".share"))
 	}
 
 	//Look for env variables
@@ -224,6 +227,7 @@ func main() {
 			}
 		}
 	}
+	err = nil
 
 	if *username != "" && *password != "" {
 		fmt.Fprintln(os.Stderr, "")
@@ -234,11 +238,14 @@ func main() {
 	}
 
 	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Directories can be downloaded:")
+	fmt.Fprintln(os.Stderr, "\t Visit /targz on any directory")
+	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Files can be uploaded:")
 	fmt.Fprintln(os.Stderr, "\tcurl --form \"file=@filename.txt\" "+serverProtocol+"://"+net.JoinHostPort(hostname, port)+"/")
 	fmt.Fprintln(os.Stderr, "\tcurl --data \"file=@filename.txt\" -H \"Content-Type: text/plain\" "+serverProtocol+"://"+net.JoinHostPort(hostname, port)+"/")
 	fmt.Fprintln(os.Stderr, "\tcurl -X PUT --data @filename.txt "+serverProtocol+"://"+net.JoinHostPort(hostname, port)+"/filename.txt")
-	fmt.Fprintln(os.Stderr, "\tvisit /upload.html")
+	fmt.Fprintln(os.Stderr, "\tVisit /upload.html on any directory")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "If the directory is a git repository (working or bare):")
 	fmt.Fprintln(os.Stderr, "\tgit clone "+serverProtocol+"://"+net.JoinHostPort(hostname, port))
@@ -294,8 +301,66 @@ func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if r.Method == "GET" && r.URL.Path == "/upload.html" {
-		fmt.Fprintf(rww, `<html><title>Upload</title><body><form action="/" method="post" enctype="multipart/form-data"><label for="file">Filenames:</label><input id="file" type="file" name="file" multiple><input type="submit" name="submit" value="Submit"></form></body></html>`)
+	if r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/targz") {
+		if _, err := os.Stat(filepath.Join(path, r.URL.Path)); !os.IsNotExist(err) {
+			http.Error(rww, "Not Found", http.StatusNotFound)
+			return
+		}
+		filename := strings.Replace(filepath.Dir(r.URL.Path), "/", "-", -1)
+		filename = filename[1:]
+		if filename == "" {
+			filename = "root"
+		}
+		filename += ".tar.gz"
+		rww.Header().Set("Content-Type", "application/x-tar")
+		rww.Header().Set("Content-Encoding", "gzip")
+		rww.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
+
+		gw := gzip.NewWriter(rww)
+		defer gw.Close()
+
+		tw := tar.NewWriter(gw)
+		defer tw.Close()
+
+		// tar bytes -> gzip bytes -> rww bytes
+		filepath.Walk(filepath.Join(path, filepath.Dir(r.URL.Path)), func(p string, info os.FileInfo, err error) error {
+			if info.Mode().IsDir() && strings.Contains(p, "/.git") {
+				return filepath.SkipDir
+			}
+			if info.Mode().IsDir() {
+				return nil
+			}
+			new_path := p[len(path):]
+			if len(new_path) == 0 {
+				return nil
+			}
+			fr, err := os.Open(p)
+			if err != nil {
+				return err
+			}
+			defer fr.Close()
+
+			if h, err := tar.FileInfoHeader(info, new_path); err != nil {
+				//log.Fatalln(err)
+				return err
+			} else {
+				h.Name = new_path
+				if err = tw.WriteHeader(h); err != nil {
+					//log.Fatalln(err)
+					return err
+				}
+			}
+			if _, err := io.Copy(tw, fr); err != nil {
+				//log.Fatalln(err)
+				return err
+			}
+			return nil
+		})
+		return
+	}
+
+	if r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/upload.html") {
+		fmt.Fprintf(rww, `<html><title>Upload</title><body><form action="./" method="post" enctype="multipart/form-data"><label for="file">Filenames:</label><input id="file" type="file" name="file" multiple><input type="submit" name="submit" value="Submit"></form></body></html>`)
 		return
 	}
 
@@ -312,7 +377,7 @@ func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		var successString string = ""
 		if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err == nil && mt == "multipart/form-data" {
-			os.MkdirAll(path[:len(path)-1]+r.URL.Path, 0775)
+			os.MkdirAll(filepath.Dir(path)+r.URL.Path, 0775)
 			reader, err := r.MultipartReader()
 			if err != nil {
 				http.Error(rww, err.Error(), http.StatusInternalServerError)
@@ -329,7 +394,7 @@ func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 				if part.FileName() != "" {
 					os.MkdirAll(path[:len(path)-1]+r.URL.Path, 0775)
-					file, err := os.Create(path[:len(path)-1] + r.URL.Path + part.FileName())
+					file, err := os.Create(filepath.Dir(path) + r.URL.Path + part.FileName())
 					if err != nil {
 						http.Error(rww, err.Error(), http.StatusInternalServerError)
 						return
@@ -348,14 +413,14 @@ func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err == nil && mt != "" {
-				os.MkdirAll(path[:len(path)-1]+r.URL.Path, 0775)
+				os.MkdirAll(filepath.Dir(path)+r.URL.Path, 0775)
 				extension := extn.GetExtensionForMime(mt)
 				if extension == "" {
 					http.Error(rww, "Content-Type not Understood", http.StatusUnsupportedMediaType)
 					return
 				}
 				filename := uuid.New() + extension
-				file, err := os.Create(path[:len(path)-1] + r.URL.Path + filename)
+				file, err := os.Create(filepath.Dir(path) + r.URL.Path + filename)
 				if err != nil {
 					http.Error(rww, err.Error(), http.StatusInternalServerError)
 					return
@@ -385,9 +450,9 @@ func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		//Need to strip the file off the path
-		os.MkdirAll(path[:len(path)-1]+r.URL.Path[:strings.LastIndex(r.URL.Path, "/")+1], 0775)
+		os.MkdirAll(filepath.Dir(path)+filepath.Dir(r.URL.Path), 0775)
 
-		file, err := os.Create(path[:len(path)-1] + r.URL.Path)
+		file, err := os.Create(filepath.Dir(path) + r.URL.Path)
 		if err != nil {
 			http.Error(rww, err.Error(), http.StatusInternalServerError)
 			return
