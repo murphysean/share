@@ -45,7 +45,7 @@ const (
 	DEFAULT_FLAG_PUSH_USERNAME = ""
 	DEFAULT_FLAG_PUSH_PASSWORD = ""
 
-	VERSION = "1.3.0"
+	VERSION = "1.3.1"
 )
 
 var (
@@ -104,6 +104,7 @@ func main() {
 	}
 	flag.Parse()
 	log.SetFlags(0)
+	log.SetOutput(os.Stdout)
 
 	if flag.Arg(0) == "help" {
 		flag.Usage()
@@ -113,7 +114,8 @@ func main() {
 	//Get the Working Directory
 	path, err = os.Getwd()
 	if err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 
 	//Get the file/dir to be shared from the path (if none specified, utilize the pwd)
@@ -121,11 +123,13 @@ func main() {
 		path = flag.Arg(0)
 		stat, err := os.Stat(path)
 		if os.IsNotExist(err) {
-			log.Fatal(err)
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
 		}
 
 		if !stat.IsDir() {
-			log.Fatal(fmt.Errorf("Provided path must be a directory"))
+			fmt.Fprintln(os.Stderr, fmt.Errorf("Provided path must be a directory"))
+			os.Exit(1)
 		}
 	}
 
@@ -133,7 +137,7 @@ func main() {
 		path = path + "/"
 	}
 
-	fmt.Println("Sharing:", path)
+	fmt.Fprintln(os.Stderr, "Sharing:", path)
 
 	//Look for a config file in etc, the home directory, or in the current directory for config (current dir overrides)
 	config := make(map[string]string)
@@ -207,7 +211,8 @@ func main() {
 	//Get the Hostname of the machine
 	hostname, err := os.Hostname()
 	if err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 
 	if *httpsPort != DEFAULT_FLAG_HTTPS_PORT {
@@ -220,12 +225,14 @@ func main() {
 	var listner net.Listener
 	listner, err = net.Listen("tcp", net.JoinHostPort(host, port))
 	if err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 
 	_, port, err = net.SplitHostPort(listner.Addr().String())
 	if err != nil {
-		log.Fatal(err)
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 
 	middleman := new(Middle)
@@ -287,15 +294,18 @@ func main() {
 	if *httpsPort != DEFAULT_FLAG_HTTPS_PORT {
 		certificate, err := tls.LoadX509KeyPair(*certPath, *keyPath)
 		if err != nil {
-			log.Fatal(err)
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
 		}
 
 		config := &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS10}
 		tlsListener := tls.NewListener(listner, config)
 
-		log.Fatal(http.Serve(tlsListener, nil))
+		fmt.Fprintln(os.Stderr, http.Serve(tlsListener, nil))
+		os.Exit(1)
 	} else {
-		log.Fatal(http.Serve(listner, nil))
+		fmt.Fprintln(os.Stderr, http.Serve(listner, nil))
+		os.Exit(1)
 	}
 }
 
@@ -399,17 +409,14 @@ func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			defer fr.Close()
 
 			if h, err := tar.FileInfoHeader(info, new_path); err != nil {
-				//log.Fatalln(err)
 				return err
 			} else {
 				h.Name = new_path
 				if err = tw.WriteHeader(h); err != nil {
-					//log.Fatalln(err)
 					return err
 				}
 			}
 			if _, err := io.Copy(tw, fr); err != nil {
-				//log.Fatalln(err)
 				return err
 			}
 			return nil

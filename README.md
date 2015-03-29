@@ -158,7 +158,8 @@ or `--insecure` flag. In wget, there is the `--no-check-certificate` flag.
 
 Another solution is to have your buddy add your self signed cert to their certificate store, thus 
 trusting any connections to your server from any client using the trust store. On ubuntu this [link][deb-cert] 
-will detail how to do this.
+will detail how to do this. Just make sure you are setting the common name to the domain name, 
+hostname or ip address of your box.
 	
 ### Configuration
 	
@@ -222,5 +223,37 @@ Type `share help` to get this information on the command line.
 		mv hooks/post-update.sample hooks/post-update
 		chmod a+x hooks/post-update
 		git update-server-info
+		
+### Running
+
+Share logs to both stdout and stderr. Here's a breakdown of where information goes:
+
+- Errors -> stderr
+- Information -> stderr
+- Access Logs -> stdout
+
+Start share and only show errors and startup information:
+
+	share > /dev/null
+	
+Start share and only show access logs (in apache format):
+
+	share 2> /dev/null
+	
+Start share and direct all output to a file _logs.txt_:
+
+	share > logs.txt 2>&1
+	
+You can also run share in the background:
+
+	share > logs.txt 2>&1 &
+	
+Or have the shell disown the process:
+
+	share > logs.txt 2>&1 & disown
+
+Or run it as a daemon:
+
+	nohup share > logs.txt 2>&1 &
 
 [deb-cert]: http://superuser.com/questions/437330/how-do-you-add-a-certificate-authority-ca-to-ubuntu "Debian Trust Store"
