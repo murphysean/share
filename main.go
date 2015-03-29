@@ -27,33 +27,39 @@ import (
 )
 
 const (
-	ENVIRONMENT_VAR_HTTP_PORT  = "SHARE_HTTP_PORT"
-	ENVIRONMENT_VAR_HTTPS_PORT = "SHARE_HTTPS_PORT"
-	ENVIRONMENT_VAR_CERT_PATH  = "SHARE_CERT_PATH"
-	ENVIRONMENT_VAR_KEY_PATH   = "SHARE_KEY_PATH"
-	ENVIRONMENT_VAR_USERNAME   = "SHARE_USERNAME"
-	ENVIRONMENT_VAR_PASSWORD   = "SHARE_PASSWORD"
+	ENVIRONMENT_VAR_HTTP_PORT     = "SHARE_HTTP_PORT"
+	ENVIRONMENT_VAR_HTTPS_PORT    = "SHARE_HTTPS_PORT"
+	ENVIRONMENT_VAR_CERT_PATH     = "SHARE_CERT_PATH"
+	ENVIRONMENT_VAR_KEY_PATH      = "SHARE_KEY_PATH"
+	ENVIRONMENT_VAR_USERNAME      = "SHARE_USERNAME"
+	ENVIRONMENT_VAR_PASSWORD      = "SHARE_PASSWORD"
+	ENVIRONMENT_VAR_PUSH_USERNAME = "SHARE_PUSH_USERNAME"
+	ENVIRONMENT_VAR_PUSH_PASSWORD = "SHARE_PUSH_PASSWORD"
 
-	DEFAULT_FLAG_HTTP_PORT  = "0"
-	DEFAULT_FLAG_HTTPS_PORT = ""
-	DEFAULT_FLAG_CERT_PATH  = "cert.pem"
-	DEFAULT_FLAG_KEY_PATH   = "key.pem"
-	DEFAULT_FLAG_USERNAME   = ""
-	DEFAULT_FLAG_PASSWORD   = ""
+	DEFAULT_FLAG_HTTP_PORT     = "0"
+	DEFAULT_FLAG_HTTPS_PORT    = ""
+	DEFAULT_FLAG_CERT_PATH     = "cert.pem"
+	DEFAULT_FLAG_KEY_PATH      = "key.pem"
+	DEFAULT_FLAG_USERNAME      = ""
+	DEFAULT_FLAG_PASSWORD      = ""
+	DEFAULT_FLAG_PUSH_USERNAME = ""
+	DEFAULT_FLAG_PUSH_PASSWORD = ""
 
-	VERSION = "1.2.0"
+	VERSION = "1.3.0"
 )
 
 var (
-	host      = ""
-	port      = ""
-	path      = ""
-	httpPort  = flag.String("http", DEFAULT_FLAG_HTTP_PORT, "Specify the listening port for HTTP traffic. 0 = system assigned.")
-	httpsPort = flag.String("https", DEFAULT_FLAG_HTTPS_PORT, "Specify the listening port for HTTPS traffic. 0 = system assigned.")
-	certPath  = flag.String("cert", DEFAULT_FLAG_CERT_PATH, "Specify the path to the cert file")
-	keyPath   = flag.String("key", DEFAULT_FLAG_KEY_PATH, "Specify the path to the key file")
-	username  = flag.String("username", DEFAULT_FLAG_USERNAME, "Set a required username for requesting clients")
-	password  = flag.String("password", DEFAULT_FLAG_PASSWORD, "Set a required password for requesting clients")
+	host         = ""
+	port         = ""
+	path         = ""
+	httpPort     = flag.String("http", DEFAULT_FLAG_HTTP_PORT, "Specify the listening port for HTTP traffic. 0 = system assigned.")
+	httpsPort    = flag.String("https", DEFAULT_FLAG_HTTPS_PORT, "Specify the listening port for HTTPS traffic. 0 = system assigned.")
+	certPath     = flag.String("cert", DEFAULT_FLAG_CERT_PATH, "Specify the path to the cert file")
+	keyPath      = flag.String("key", DEFAULT_FLAG_KEY_PATH, "Specify the path to the key file")
+	username     = flag.String("username", DEFAULT_FLAG_USERNAME, "Set a required username for requesting clients")
+	password     = flag.String("password", DEFAULT_FLAG_PASSWORD, "Set a required password for requesting clients")
+	pushUsername = flag.String("push-username", DEFAULT_FLAG_PUSH_USERNAME, "Set a required username for clients pushing or uploading")
+	pushPassword = flag.String("push-password", DEFAULT_FLAG_PUSH_PASSWORD, "Set a required password for clients pushing or uploading")
 )
 
 func init() {
@@ -67,15 +73,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, "share [-p|-http <http-port>] [-https <https-port>]")
 		fmt.Fprintln(os.Stderr, "\t[-cert <path-to-pem>] [-key <path-to-pem>]")
 		fmt.Fprintln(os.Stderr, "\t[-username <username>] [-password <password>]")
+		fmt.Fprintln(os.Stderr, "\t[-push-username <username>] [-push-password <password>]")
 		fmt.Fprintln(os.Stderr, "\t[directory path|'help']")
 		fmt.Fprintln(os.Stderr, "")
 		flag.PrintDefaults()
 
 		fmt.Fprintln(os.Stderr, "")
-		fmt.Fprintf(os.Stderr, "As an alternative to flags, use the environment variables \n\t%s\n\t%s\n\t%s\n\t%s\n\t%s\n\t%s\n",
+		fmt.Fprintf(os.Stderr, "As an alternative to flags, use the environment variables \n\t%s\n\t%s\n\t%s\n\t%s\n\t%s\n\t%s\n\t%s\n\t%s\n",
 			[]interface{}{ENVIRONMENT_VAR_HTTP_PORT, ENVIRONMENT_VAR_HTTPS_PORT,
 				ENVIRONMENT_VAR_CERT_PATH, ENVIRONMENT_VAR_KEY_PATH,
-				ENVIRONMENT_VAR_USERNAME, ENVIRONMENT_VAR_PASSWORD}...)
+				ENVIRONMENT_VAR_USERNAME, ENVIRONMENT_VAR_PASSWORD,
+				ENVIRONMENT_VAR_PUSH_USERNAME, ENVIRONMENT_VAR_PUSH_PASSWORD}...)
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "You can also keep these environment variables in a file called")
 		fmt.Fprintln(os.Stderr, "\t.share in your home directory, and/or the directory in which")
@@ -127,17 +135,24 @@ func main() {
 
 	fmt.Println("Sharing:", path)
 
-	//Look for a config file in the home directory, or in the current directory for config (current dir overrides)
+	//Look for a config file in etc, the home directory, or in the current directory for config (current dir overrides)
 	config := make(map[string]string)
+	//Look for a config file at /etc/share/share.conf
+	if _, err := os.Stat("/etc/share/share.conf"); err == nil {
+		config = readConfig(config, "/etc/share/share.conf")
+		fmt.Fprintln(os.Stderr, "Read /etc/share/share.conf")
+	}
 	//Start with the home directory config
 	if usr, err := user.Current(); err == nil {
 		if _, err := os.Stat(filepath.Join(usr.HomeDir, "/.share")); !os.IsNotExist(err) {
 			config = readConfig(config, filepath.Join(usr.HomeDir, "/.share"))
+			fmt.Fprintln(os.Stderr, "Read "+filepath.Join(usr.HomeDir, "/.share"))
 		}
 	}
 	//Now load overtop the path's config
 	if _, err = os.Stat(filepath.Join(path, "/.share")); !os.IsNotExist(err) {
 		config = readConfig(config, filepath.Join(path+".share"))
+		fmt.Fprintln(os.Stderr, "Read "+filepath.Join(path+".share"))
 	}
 
 	//Look for env variables
@@ -172,6 +187,21 @@ func main() {
 		flag.Set("password", os.Getenv(ENVIRONMENT_VAR_PASSWORD))
 	} else if *password == DEFAULT_FLAG_PASSWORD && config[ENVIRONMENT_VAR_PASSWORD] != "" {
 		flag.Set("password", config[ENVIRONMENT_VAR_PASSWORD])
+	}
+	if *pushUsername == DEFAULT_FLAG_PUSH_USERNAME && os.Getenv(ENVIRONMENT_VAR_PUSH_USERNAME) != "" {
+		flag.Set("push-username", os.Getenv(ENVIRONMENT_VAR_PUSH_USERNAME))
+	} else if *pushUsername == DEFAULT_FLAG_PUSH_USERNAME && config[ENVIRONMENT_VAR_PUSH_USERNAME] != "" {
+		flag.Set("push-username", config[ENVIRONMENT_VAR_PUSH_USERNAME])
+	}
+	if *pushPassword == DEFAULT_FLAG_PUSH_PASSWORD && os.Getenv(ENVIRONMENT_VAR_PUSH_PASSWORD) != "" {
+		flag.Set("push-password", os.Getenv(ENVIRONMENT_VAR_PUSH_PASSWORD))
+	} else if *pushPassword == DEFAULT_FLAG_PUSH_PASSWORD && config[ENVIRONMENT_VAR_PUSH_PASSWORD] != "" {
+		flag.Set("push-password", config[ENVIRONMENT_VAR_PUSH_PASSWORD])
+	}
+	if *username != DEFAULT_FLAG_USERNAME && *password != DEFAULT_FLAG_PASSWORD &&
+		*pushUsername == DEFAULT_FLAG_PUSH_USERNAME && *pushPassword == DEFAULT_FLAG_PUSH_PASSWORD {
+		flag.Set("push-username", *username)
+		flag.Set("push-password", *password)
 	}
 
 	//Get the Hostname of the machine
@@ -286,7 +316,7 @@ func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer logApache(rww, r)
 
 	//If username and password required, check for credentials from the user, and prompt for them if not provided
-	if *username != "" && *password != "" {
+	if (r.Method == "GET" || r.Method == "HEAD") && *username != "" && *password != "" {
 		if u, p, ok := r.BasicAuth(); ok {
 			if u != *username || p != *password {
 				rww.Header().Set("WWW-Authenticate", `Basic realm="share"`)
@@ -299,6 +329,34 @@ func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(rww, "Not Authorized", http.StatusUnauthorized)
 			return
 		}
+	}
+	if (r.Method == "POST" || r.Method == "PUT" || r.Method == "PATCH" || r.Method == "DELETE") && *pushUsername != "" && *pushPassword != "" {
+		if u, p, ok := r.BasicAuth(); ok {
+			if u != *pushUsername || p != *pushPassword {
+				rww.Header().Set("WWW-Authenticate", `Basic realm="push-share"`)
+				http.Error(rww, "Not Authorized", http.StatusUnauthorized)
+				return
+			}
+			r.Header.Set("User-Id", u)
+		} else {
+			rww.Header().Set("WWW-Authenticate", `Basic realm="push-share"`)
+			http.Error(rww, "Not Authorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	if r.Method == "DELETE" {
+		if r.URL.Path == "/" {
+			http.Error(rww, "Can't delete main directory", http.StatusMethodNotAllowed)
+			return
+		}
+		err := os.RemoveAll(filepath.Join(path, r.URL.Path))
+		if err != nil {
+			http.Error(rww, err.Error(), http.StatusInternalServerError)
+		} else {
+			rww.WriteHeader(http.StatusNoContent)
+		}
+		return
 	}
 
 	if r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/targz") {

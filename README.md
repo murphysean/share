@@ -1,7 +1,7 @@
 Share
 ===
 
-Have you ever wanted to share some files with a buddy on your lan, and had to go through all 
+Have you ever wanted to share some files with a buddy on your LAN, and had to go through all 
 sorts of hassle to get that working? Or perhaps you wonder what it would be like to actually use 
 git as a distributed version control system?
 
@@ -14,6 +14,12 @@ Install
 To install make sure you have go installed, then it's as easy as getting this library:
 
 	go get github.com/murphysean/share
+
+I've only tested share on ubuntu linux 64. I'd be happy if any contributors would like to 
+verify or expand this to other platforms.
+
+Run
+---
 	
 ### Sharing
 
@@ -50,7 +56,7 @@ Share also comes with a 'smart' git server built in. So others can git clone, fe
 using the same http(s) address that they can use to browse. After you `git init` your directory 
 others could clone your repository like so:
 
-	git clone http://192.168.1.3/
+	git clone http://host:port/
 	
 And finally you can change the directory you wish to share (default is the current directory)
 
@@ -70,7 +76,7 @@ However sometimes you'd really just like to receive that handy little script fro
 Share has a built in web-page that allows someone to use an html form to upload files. Just 
 navigate to `http(s)://yourip:port/upload.html`, select a file, and upload it.
 
-Share also allows POST and PUT verbs. So for the curl guys out there:
+Share also allows POST, PUT and DELETE verbs. So for the curl guys out there:
 
 1. Form upload files (POST)
 
@@ -84,9 +90,90 @@ Share also allows POST and PUT verbs. So for the curl guys out there:
 
 	`curl -X PUT --data @filename.txt http(s)://host:port/filename.txt`
 	
+4. Delete a file on the server (DELETE)
+
+	`curl -X DELETE http(s)://host:port/filename.txt`
+	
 The POST call will work on any directory path (Path ends with a /) even if the directory does not yet 
 exist. The PUT verb will work on any file (Path doesn't end with a /) even if the path doesn't exist 
-yet.
+yet. Finally the DELETE verb will work on any file or directory as long as it isn\'t the root 
+directory.
+
+### Authentication
+
+Share allows you to protect your directory through http basic authorization. Since share allows 
+clients to both pull (GET, HEAD), and push (POST, PUT, PATCH, DELETE), share allows you to control 
+access for both of these operations. Setting the -username and -password flags will enable 
+protection for both pulling and pushing clients. It will force them to use those credentials.
+
+If you also set the -push-username and -push-password flags, the credentials for pulling clients 
+will remain those set for -username and -password, but will require pushing clients to use the push 
+credentials.
+
+Finally if you only set the -push-* credentials, pulling clients will not be required to 
+authenticate, but pushing clients will.
+
+Examples:
+
+1. `share -username sean -password sean` will require both pushing and pulling clients to 
+authenticate with sean:sean.
+2. `share -username -password sean -push-username git -push-password git` will require pushing 
+clients to use sean:sean, and pulling clients to use git:git
+3. `share push-username git -push-password git` will allow anyone to download or fetch files from 
+share, but will require pushing clients to authenticate with git:git
+
+In curl you can enable basic authentication using the -u flag. For example: 
+`curl -u sean:sean http(s)://host:port/filename.txt`. In wget you can enable basic authentication 
+by using the `--username` and `--password` flags. For example: 
+`wget http(s)://host:port/filename.txt --user=sean --password=sean`.
+
+### TLS/SSL and enabling secure communication to share
+
+If you want to enable https communication to share all you'll need is to get ahold of a certificate 
+file and a key file. The easiest way is to create a rsa key, and a self signed cert:
+
+	openssl req -newkey rsa:2048 -new -nodes -x509 -days 3650 -keyout key.pem -out cert.pem
+	
+You'll want to put these files somewhere that won't be shared through _share_, otherwise your 
+private key used to secure traffic could be compromised.
+
+The recommended option is to create a _.share_ file in your home directory along with your _cert.pem_ 
+and your _key.pem_ files. In the share file put the full path to the _cert.pem_ and _key.pem_ files 
+as the attributes to the environment variable keys. It will look something like this:
+
+	SHARE_CERT_PATH=/home/sean/cert.pem
+	SHARE_KEY_PATH=/home/sean/key.pem
+	
+Finally you'll just want to start share up with the `-https` command line flag, or the `SHARE_HTTPS_PORT` 
+environment variable set. You can specify the port as 0 to just have share nab a system assigned port.
+
+If you are lucky enough to have a certificate signed by a trusted certificate authority and a valid 
+signing chain then clients will trust you and you'll get the nice green lock in most browsers.
+However if you are just sharing over ip addresses or hostnames on a local network you'll run into 
+problems with https validation in both browsers and clients.
+
+The easiest solution to this problem is to just have those browsing your share to click the bypass 
+button in their browser and "proceed unsafely". You can also do the equivalent in curl using the `-k` 
+or `--insecure` flag. In wget, there is the `--no-check-certificate` flag.
+
+Another solution is to have your buddy add your self signed cert to their certificate store, thus 
+trusting any connections to your server from any client using the trust store. On ubuntu this [link][deb-cert] 
+will detail how to do this.
+	
+### Configuration
+	
+Share looks for configuration in a number of places as it starts up:
+
+1. The command line flags
+2. Environment variables
+3. A .share file in the share directory
+4. A .share file in the users home directory
+5. A share.conf file at /etc/share/share.conf
+
+Configuration settings found at the lower numbers will override those found at the higher numbers. 
+Options [3-5] are basic .ini type configuration files. The keys match the environment variable keys, 
+and all start with SHARE\_*. Certificates, keys, usernames and passwords are all good options to 
+keep in config that will not be available through the share directory itself.
 
 ### Usage
 
@@ -96,15 +183,18 @@ Type `share help` to get this information on the command line.
 	share [-h] [-p|-http <http-port>] [-https <https-port>]
 		[-cert <path-to-pem>] [-key <path-to-pem>]
 		[-username <username>] [-password <password>]
+		[-push-username <username>] [-push-password <password>]
 		[directory path|'help']
 
-	-cert="cert.pem": Specify the path to the cert file
 	-http="0": Specify the listening port for HTTP traffic. 0 = system assigned.
-	-https="": Specify the listening port for HTTPS traffic. 0 = system assigned.
-	-key="key.pem": Specify the path to the key file
 	-p="0": Short version of http port
-	-password="": Set a required password for requesting clients
+	-https="": Specify the listening port for HTTPS traffic. 0 = system assigned.
+	-cert="cert.pem": Specify the path to the cert file
+	-key="key.pem": Specify the path to the key file
 	-username="": Set a required username for requesting clients
+	-password="": Set a required password for requesting clients
+	-push-username="": Set a required username for clients pushing or uploading
+	-push-password="": Set a required password for clients pushing or uploading
 
 	As an alternative to flags, use the environment variables 
 		SHARE_HTTP_PORT
@@ -113,6 +203,8 @@ Type `share help` to get this information on the command line.
 		SHARE_KEY_PATH
 		SHARE_USERNAME
 		SHARE_PASSWORD
+		SHARE_PUSH_USERNAME
+		SHARE_PUSH_PASSWORD
 
 	You can also keep these environment variables in a file called
 		.share in your home directory, and/or the directory in which
@@ -130,3 +222,5 @@ Type `share help` to get this information on the command line.
 		mv hooks/post-update.sample hooks/post-update
 		chmod a+x hooks/post-update
 		git update-server-info
+
+[deb-cert]: http://superuser.com/questions/437330/how-do-you-add-a-certificate-authority-ca-to-ubuntu "Debian Trust Store"
