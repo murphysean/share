@@ -3,11 +3,19 @@ package main
 import (
 	"archive/tar"
 	"bufio"
+	"code.google.com/p/go-uuid/uuid"
 	"compress/gzip"
 	"crypto/tls"
-	"flag"
 	"fmt"
+	"github.com/AaronO/go-git-http"
+	"github.com/murphysean/advhttp"
+	"github.com/murphysean/heimdall"
+	"github.com/murphysean/heimdall/memdb"
+	"github.com/murphysean/share/extn"
+	flag "github.com/ogier/pflag"
+	"github.com/russross/blackfriday"
 	"io"
+	"io/ioutil"
 	"log"
 	"mime"
 	"net"
@@ -19,16 +27,10 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
-
-	"code.google.com/p/go-uuid/uuid"
-	"github.com/AaronO/go-git-http"
-	"github.com/murphysean/advhttp"
-	"github.com/murphysean/share/extn"
 )
 
 const (
-	ENVIRONMENT_VAR_HTTP_PORT     = "SHARE_HTTP_PORT"
-	ENVIRONMENT_VAR_HTTPS_PORT    = "SHARE_HTTPS_PORT"
+	ENVIRONMENT_VAR_PORT          = "SHARE_PORT"
 	ENVIRONMENT_VAR_CERT_PATH     = "SHARE_CERT_PATH"
 	ENVIRONMENT_VAR_KEY_PATH      = "SHARE_KEY_PATH"
 	ENVIRONMENT_VAR_USERNAME      = "SHARE_USERNAME"
@@ -36,8 +38,7 @@ const (
 	ENVIRONMENT_VAR_PUSH_USERNAME = "SHARE_PUSH_USERNAME"
 	ENVIRONMENT_VAR_PUSH_PASSWORD = "SHARE_PUSH_PASSWORD"
 
-	DEFAULT_FLAG_HTTP_PORT     = "0"
-	DEFAULT_FLAG_HTTPS_PORT    = ""
+	DEFAULT_FLAG_PORT          = "0"
 	DEFAULT_FLAG_CERT_PATH     = "cert.pem"
 	DEFAULT_FLAG_KEY_PATH      = "key.pem"
 	DEFAULT_FLAG_USERNAME      = ""
@@ -45,42 +46,36 @@ const (
 	DEFAULT_FLAG_PUSH_USERNAME = ""
 	DEFAULT_FLAG_PUSH_PASSWORD = ""
 
-	VERSION = "1.3.1"
+	VERSION = "1.4.0"
 )
 
 var (
 	host         = ""
-	port         = ""
 	path         = ""
-	httpPort     = flag.String("http", DEFAULT_FLAG_HTTP_PORT, "Specify the listening port for HTTP traffic. 0 = system assigned.")
-	httpsPort    = flag.String("https", DEFAULT_FLAG_HTTPS_PORT, "Specify the listening port for HTTPS traffic. 0 = system assigned.")
-	certPath     = flag.String("cert", DEFAULT_FLAG_CERT_PATH, "Specify the path to the cert file")
-	keyPath      = flag.String("key", DEFAULT_FLAG_KEY_PATH, "Specify the path to the key file")
-	username     = flag.String("username", DEFAULT_FLAG_USERNAME, "Set a required username for requesting clients")
-	password     = flag.String("password", DEFAULT_FLAG_PASSWORD, "Set a required password for requesting clients")
-	pushUsername = flag.String("push-username", DEFAULT_FLAG_PUSH_USERNAME, "Set a required username for clients pushing or uploading")
-	pushPassword = flag.String("push-password", DEFAULT_FLAG_PUSH_PASSWORD, "Set a required password for clients pushing or uploading")
+	port         = flag.StringP("port", "p", DEFAULT_FLAG_PORT, "Specify the tcp listening port for traffic. 0 = system assigned.")
+	certPath     = flag.StringP("cert", "c", DEFAULT_FLAG_CERT_PATH, "Specify the path to the cert file")
+	keyPath      = flag.StringP("key", "k", DEFAULT_FLAG_KEY_PATH, "Specify the path to the key file")
+	username     = flag.StringP("username", "u", DEFAULT_FLAG_USERNAME, "Set a required username for requesting clients")
+	password     = flag.StringP("password", "P", DEFAULT_FLAG_PASSWORD, "Set a required password for requesting clients")
+	pushUsername = flag.StringP("push-username", "a", DEFAULT_FLAG_PUSH_USERNAME, "Set a required username for clients pushing or uploading")
+	pushPassword = flag.StringP("push-password", "b", DEFAULT_FLAG_PUSH_PASSWORD, "Set a required password for clients pushing or uploading")
 )
-
-func init() {
-	flag.StringVar(httpPort, "p", DEFAULT_FLAG_HTTP_PORT, "Short version of http port")
-}
 
 func main() {
 	var err error
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of %s v%s:\n", os.Args[0], VERSION)
-		fmt.Fprintln(os.Stderr, "share [-p|-http <http-port>] [-https <https-port>]")
-		fmt.Fprintln(os.Stderr, "\t[-cert <path-to-pem>] [-key <path-to-pem>]")
-		fmt.Fprintln(os.Stderr, "\t[-username <username>] [-password <password>]")
-		fmt.Fprintln(os.Stderr, "\t[-push-username <username>] [-push-password <password>]")
+		fmt.Fprintln(os.Stderr, "share [-p|-port <http-port>]")
+		fmt.Fprintln(os.Stderr, "\t[-c|-cert <path-to-pem>] [-k|-key <path-to-pem>]")
+		fmt.Fprintln(os.Stderr, "\t[-u|-username <username>] [-P|-password <password>]")
+		fmt.Fprintln(os.Stderr, "\t[-a|-push-username <username>] [-b|-push-password <password>]")
 		fmt.Fprintln(os.Stderr, "\t[directory path|'help']")
 		fmt.Fprintln(os.Stderr, "")
 		flag.PrintDefaults()
 
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintf(os.Stderr, "As an alternative to flags, use the environment variables \n\t%s\n\t%s\n\t%s\n\t%s\n\t%s\n\t%s\n\t%s\n\t%s\n",
-			[]interface{}{ENVIRONMENT_VAR_HTTP_PORT, ENVIRONMENT_VAR_HTTPS_PORT,
+			[]interface{}{ENVIRONMENT_VAR_PORT,
 				ENVIRONMENT_VAR_CERT_PATH, ENVIRONMENT_VAR_KEY_PATH,
 				ENVIRONMENT_VAR_USERNAME, ENVIRONMENT_VAR_PASSWORD,
 				ENVIRONMENT_VAR_PUSH_USERNAME, ENVIRONMENT_VAR_PUSH_PASSWORD}...)
@@ -103,8 +98,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "\tgit update-server-info")
 	}
 	flag.Parse()
-	log.SetFlags(0)
-	log.SetOutput(os.Stdout)
 
 	if flag.Arg(0) == "help" {
 		flag.Usage()
@@ -160,15 +153,10 @@ func main() {
 	}
 
 	//Look for env variables
-	if *httpPort == DEFAULT_FLAG_HTTP_PORT && os.Getenv(ENVIRONMENT_VAR_HTTP_PORT) != "" {
-		flag.Set("http", os.Getenv(ENVIRONMENT_VAR_HTTP_PORT))
-	} else if *httpPort == DEFAULT_FLAG_HTTP_PORT && config[ENVIRONMENT_VAR_HTTP_PORT] != "" {
-		flag.Set("http", config[ENVIRONMENT_VAR_HTTP_PORT])
-	}
-	if *httpsPort == DEFAULT_FLAG_HTTPS_PORT && os.Getenv(ENVIRONMENT_VAR_HTTPS_PORT) != "" {
-		flag.Set("https", os.Getenv(ENVIRONMENT_VAR_HTTPS_PORT))
-	} else if *httpsPort == DEFAULT_FLAG_HTTPS_PORT && config[ENVIRONMENT_VAR_HTTPS_PORT] != "" {
-		flag.Set("https", config[ENVIRONMENT_VAR_HTTPS_PORT])
+	if *port == DEFAULT_FLAG_PORT && os.Getenv(ENVIRONMENT_VAR_PORT) != "" {
+		flag.Set("port", os.Getenv(ENVIRONMENT_VAR_PORT))
+	} else if *port == DEFAULT_FLAG_PORT && config[ENVIRONMENT_VAR_PORT] != "" {
+		flag.Set("port", config[ENVIRONMENT_VAR_PORT])
 	}
 	if *certPath == DEFAULT_FLAG_CERT_PATH && os.Getenv(ENVIRONMENT_VAR_CERT_PATH) != "" {
 		flag.Set("cert", os.Getenv(ENVIRONMENT_VAR_CERT_PATH))
@@ -215,21 +203,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	if *httpsPort != DEFAULT_FLAG_HTTPS_PORT {
-		port = *httpsPort
-	} else if *httpPort != DEFAULT_FLAG_HTTP_PORT {
-		port = *httpPort
-	} else {
-		port = "0"
-	}
 	var listner net.Listener
-	listner, err = net.Listen("tcp", net.JoinHostPort(host, port))
+	listner, err = net.Listen("tcp", net.JoinHostPort(host, *port))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
-	_, port, err = net.SplitHostPort(listner.Addr().String())
+	_, *port, err = net.SplitHostPort(listner.Addr().String())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -245,32 +226,58 @@ func main() {
 	middleman.git = githandler
 	http.Handle("/", middleman)
 
+	hh := heimdall.NewHeimdall(middleman, scopeFunc, pepFunc, failFunc)
+	ch := advhttp.NewDefaultCorsHandler(hh)
+	//ph := advhttp.NewPanicRecoveryHandler(ch)
+	//lh := advhttp.NewLoggingHandler(ph, os.Stdout)
+	lh := advhttp.NewLoggingHandler(ch, os.Stdout)
+	hh.DB = memdb.NewMemDB()
+	//hh.Templates = template.Must(template.ParseFiles())
+
 	fmt.Fprintln(os.Stderr, "Share Server\tVersion "+VERSION)
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	fmt.Fprintf(os.Stderr, "GOMAXPROCS=%v\n", runtime.NumCPU())
 	serverProtocol := "http"
-	if *httpsPort != DEFAULT_FLAG_HTTPS_PORT {
+	if *certPath != DEFAULT_FLAG_CERT_PATH && *keyPath != DEFAULT_FLAG_KEY_PATH {
 		serverProtocol = "https"
 	}
 	fmt.Fprintln(os.Stderr, "Serving "+serverProtocol+" on:")
-	fmt.Fprintln(os.Stderr, "\thost\t"+net.JoinHostPort(hostname, port))
+	fmt.Fprintln(os.Stderr, "\thost\t"+net.JoinHostPort(hostname, *port))
 	out, err := exec.Command("ip", "-4", "addr", "show").Output()
 	if err == nil {
 		re := regexp.MustCompile(`(?m)inet ([0-9].*)\/.*(\b.*[0-9])$`)
 		vs := re.FindAllStringSubmatch(string(out), -1)
 		for _, as := range vs {
 			if len(as) == 3 {
-				fmt.Fprintln(os.Stderr, "\t"+as[2]+"\t"+net.JoinHostPort(as[1], port))
+				fmt.Fprintln(os.Stderr, "\t"+as[2]+"\t"+net.JoinHostPort(as[1], *port))
 			}
 		}
 	}
 	err = nil
 
 	if *username != "" && *password != "" {
+		//Put in the user(s) from config into the db
+		user := hh.DB.NewUser()
+		user.SetId(*username)
+		user.SetName(*username)
+		user.(memdb.User)["username"] = *username
+		user.(memdb.User)["password"] = *password
+		hh.DB.CreateUser(user)
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "User/Pass Required:")
 		fmt.Fprintln(os.Stderr, "\tUsername: "+*username)
 		fmt.Fprintln(os.Stderr, "\tPassword: "+*password)
+		if *pushUsername != "" && *pushPassword != "" {
+			pu := hh.DB.NewUser()
+			pu.SetId(*pushUsername)
+			pu.SetName(*pushUsername)
+			pu.(memdb.User)["username"] = *pushUsername
+			pu.(memdb.User)["password"] = *pushPassword
+			hh.DB.CreateUser(pu)
+			fmt.Fprintln(os.Stderr, "Write User/Pass Required:")
+			fmt.Fprintln(os.Stderr, "\tPush Username: "+*pushUsername)
+			fmt.Fprintln(os.Stderr, "\tPush Password: "+*pushPassword)
+		}
 		fmt.Fprintln(os.Stderr, "\tcurl -u "+*username+":"+*password)
 	}
 
@@ -279,19 +286,19 @@ func main() {
 	fmt.Fprintln(os.Stderr, "\t Visit /targz on any directory")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Files can be uploaded:")
-	fmt.Fprintln(os.Stderr, "\tcurl --form \"file=@filename.txt\" "+serverProtocol+"://"+net.JoinHostPort(hostname, port)+"/")
-	fmt.Fprintln(os.Stderr, "\tcurl --data \"file=@filename.txt\" -H \"Content-Type: text/plain\" "+serverProtocol+"://"+net.JoinHostPort(hostname, port)+"/")
-	fmt.Fprintln(os.Stderr, "\tcurl -X PUT --data @filename.txt "+serverProtocol+"://"+net.JoinHostPort(hostname, port)+"/filename.txt")
+	fmt.Fprintln(os.Stderr, "\tcurl --form \"file=@filename.txt\" "+serverProtocol+"://"+net.JoinHostPort(hostname, *port)+"/")
+	fmt.Fprintln(os.Stderr, "\tcurl --data \"file=@filename.txt\" -H \"Content-Type: text/plain\" "+serverProtocol+"://"+net.JoinHostPort(hostname, *port)+"/")
+	fmt.Fprintln(os.Stderr, "\tcurl -X PUT --data @filename.txt "+serverProtocol+"://"+net.JoinHostPort(hostname, *port)+"/filename.txt")
 	fmt.Fprintln(os.Stderr, "\tVisit /upload.html on any directory")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "If the directory is a git repository (working or bare):")
-	fmt.Fprintln(os.Stderr, "\tgit clone "+serverProtocol+"://"+net.JoinHostPort(hostname, port))
+	fmt.Fprintln(os.Stderr, "\tgit clone "+serverProtocol+"://"+net.JoinHostPort(hostname, *port))
 	fmt.Fprintln(os.Stderr, "\tThere is also support for git push")
 	fmt.Fprintln(os.Stderr, "\tgit push")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Press ctrl-c to stop sharing")
 
-	if *httpsPort != DEFAULT_FLAG_HTTPS_PORT {
+	if serverProtocol == "https" {
 		certificate, err := tls.LoadX509KeyPair(*certPath, *keyPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -301,10 +308,10 @@ func main() {
 		config := &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS10}
 		tlsListener := tls.NewListener(listner, config)
 
-		fmt.Fprintln(os.Stderr, http.Serve(tlsListener, nil))
+		fmt.Fprintln(os.Stderr, http.Serve(tlsListener, lh))
 		os.Exit(1)
 	} else {
-		fmt.Fprintln(os.Stderr, http.Serve(listner, nil))
+		fmt.Fprintln(os.Stderr, http.Serve(listner, lh))
 		os.Exit(1)
 	}
 }
@@ -319,59 +326,58 @@ func logApache(w *advhttp.ResponseWriter, r *http.Request) {
 }
 
 func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	rww := advhttp.NewResponseWriter(w)
 	//Put in a header that says this was share that served the content
-	rww.Header().Set("Server", "Share/"+VERSION)
-	rww.Header().Set("X-Powered-By", runtime.Version())
-	defer logApache(rww, r)
-
-	//If username and password required, check for credentials from the user, and prompt for them if not provided
-	if (r.Method == "GET" || r.Method == "HEAD") && *username != "" && *password != "" {
-		if u, p, ok := r.BasicAuth(); ok {
-			if u != *username || p != *password {
-				rww.Header().Set("WWW-Authenticate", `Basic realm="share"`)
-				http.Error(rww, "Not Authorized", http.StatusUnauthorized)
-				return
-			}
-			r.Header.Set("User-Id", u)
-		} else {
-			rww.Header().Set("WWW-Authenticate", `Basic realm="share"`)
-			http.Error(rww, "Not Authorized", http.StatusUnauthorized)
-			return
-		}
-	}
-	if (r.Method == "POST" || r.Method == "PUT" || r.Method == "PATCH" || r.Method == "DELETE") && *pushUsername != "" && *pushPassword != "" {
-		if u, p, ok := r.BasicAuth(); ok {
-			if u != *pushUsername || p != *pushPassword {
-				rww.Header().Set("WWW-Authenticate", `Basic realm="push-share"`)
-				http.Error(rww, "Not Authorized", http.StatusUnauthorized)
-				return
-			}
-			r.Header.Set("User-Id", u)
-		} else {
-			rww.Header().Set("WWW-Authenticate", `Basic realm="push-share"`)
-			http.Error(rww, "Not Authorized", http.StatusUnauthorized)
-			return
-		}
-	}
+	w.Header().Set("Server", "Share/"+VERSION)
+	w.Header().Set("X-Powered-By", runtime.Version())
 
 	if r.Method == "DELETE" {
 		if r.URL.Path == "/" {
-			http.Error(rww, "Can't delete main directory", http.StatusMethodNotAllowed)
+			http.Error(w, "Can't delete main directory", http.StatusMethodNotAllowed)
 			return
 		}
 		err := os.RemoveAll(filepath.Join(path, r.URL.Path))
 		if err != nil {
-			http.Error(rww, err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 		} else {
-			rww.WriteHeader(http.StatusNoContent)
+			w.WriteHeader(http.StatusNoContent)
 		}
+		return
+	}
+
+	if r.Method == "GET" && strings.HasSuffix(r.URL.Path, ".md") && strings.Contains(r.Header.Get("Accept"), "text/html") {
+		b, err := ioutil.ReadFile(filepath.Join(path, r.URL.Path))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		//Get title
+		title := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1 : strings.LastIndex(r.URL.Path, ".")]
+		//Set up options
+		extensions := 0
+		extensions |= blackfriday.EXTENSION_NO_INTRA_EMPHASIS
+		extensions |= blackfriday.EXTENSION_TABLES
+		extensions |= blackfriday.EXTENSION_FENCED_CODE
+		extensions |= blackfriday.EXTENSION_AUTOLINK
+		extensions |= blackfriday.EXTENSION_STRIKETHROUGH
+		extensions |= blackfriday.EXTENSION_SPACE_HEADERS
+		extensions |= blackfriday.EXTENSION_AUTO_HEADER_IDS
+		extensions |= blackfriday.EXTENSION_HEADER_IDS
+		//Set up flags
+		htmlFlags := 0
+		htmlFlags |= blackfriday.HTML_USE_SMARTYPANTS
+		htmlFlags |= blackfriday.HTML_SMARTYPANTS_FRACTIONS
+		htmlFlags |= blackfriday.HTML_COMPLETE_PAGE
+		//htmlFlags |= blackfriday.HTML_TOC
+		r := blackfriday.HtmlRenderer(htmlFlags, title, "")
+		md := blackfriday.Markdown(b, r, extensions)
+		w.WriteHeader(http.StatusOK)
+		w.Write(md)
 		return
 	}
 
 	if r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/targz") {
 		if _, err := os.Stat(filepath.Join(path, r.URL.Path)); !os.IsNotExist(err) {
-			http.Error(rww, "Not Found", http.StatusNotFound)
+			http.Error(w, "Not Found", http.StatusNotFound)
 			return
 		}
 		filename := strings.Replace(filepath.Dir(r.URL.Path), "/", "-", -1)
@@ -380,17 +386,17 @@ func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			filename = "root"
 		}
 		filename += ".tar.gz"
-		rww.Header().Set("Content-Type", "application/x-tar")
-		rww.Header().Set("Content-Encoding", "gzip")
-		rww.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
+		w.Header().Set("Content-Type", "application/x-tar")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
 
-		gw := gzip.NewWriter(rww)
+		gw := gzip.NewWriter(w)
 		defer gw.Close()
 
 		tw := tar.NewWriter(gw)
 		defer tw.Close()
 
-		// tar bytes -> gzip bytes -> rww bytes
+		// tar bytes -> gzip bytes -> w bytes
 		filepath.Walk(filepath.Join(path, filepath.Dir(r.URL.Path)), func(p string, info os.FileInfo, err error) error {
 			if info.Mode().IsDir() && strings.Contains(p, "/.git") {
 				return filepath.SkipDir
@@ -425,19 +431,19 @@ func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/upload.html") {
-		fmt.Fprintf(rww, `<html><title>Upload</title><body><form action="./" method="post" enctype="multipart/form-data"><label for="file">Filenames:</label><input id="file" type="file" name="file" multiple><input type="submit" name="submit" value="Submit"></form></body></html>`)
+		fmt.Fprintf(w, `<html><title>Upload</title><body><form action="./" method="post" enctype="multipart/form-data"><label for="file">Filenames:</label><input id="file" type="file" name="file" multiple><input type="submit" name="submit" value="Submit"></form></body></html>`)
 		return
 	}
 
 	//See if this is a git request
 	if isGitRequest(r.URL.Path) {
-		m.git.ServeHTTP(rww, r)
+		m.git.ServeHTTP(w, r)
 		return
 	}
 
 	if r.Method == "POST" {
 		if !strings.HasSuffix(r.URL.Path, "/") {
-			http.Error(rww, "POST is allowed on directories only", http.StatusNotFound)
+			http.Error(w, "POST is allowed on directories only", http.StatusNotFound)
 			return
 		}
 		var successString string = ""
@@ -445,7 +451,7 @@ func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			os.MkdirAll(filepath.Dir(path)+r.URL.Path, 0775)
 			reader, err := r.MultipartReader()
 			if err != nil {
-				http.Error(rww, err.Error(), http.StatusInternalServerError)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 			for {
@@ -454,24 +460,24 @@ func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 				if err != nil {
-					http.Error(rww, err.Error(), http.StatusInternalServerError)
+					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
 				}
 				if part.FileName() != "" {
 					os.MkdirAll(path[:len(path)-1]+r.URL.Path, 0775)
 					file, err := os.Create(filepath.Dir(path) + r.URL.Path + part.FileName())
 					if err != nil {
-						http.Error(rww, err.Error(), http.StatusInternalServerError)
+						http.Error(w, err.Error(), http.StatusInternalServerError)
 						return
 					}
 					defer file.Close()
 
 					size, err := io.Copy(file, part)
 					if err != nil {
-						http.Error(rww, err.Error(), http.StatusInternalServerError)
+						http.Error(w, err.Error(), http.StatusInternalServerError)
 						return
 					}
-					rww.Header().Add("Location", r.URL.Path+part.FileName())
+					w.Header().Add("Location", r.URL.Path+part.FileName())
 					successString += fmt.Sprintf("Created: %v, Size: %v bytes\n", part.FileName(), size)
 				}
 				part.Close()
@@ -481,37 +487,37 @@ func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				os.MkdirAll(filepath.Dir(path)+r.URL.Path, 0775)
 				extension := extn.GetExtensionForMime(mt)
 				if extension == "" {
-					http.Error(rww, "Content-Type not Understood", http.StatusUnsupportedMediaType)
+					http.Error(w, "Content-Type not Understood", http.StatusUnsupportedMediaType)
 					return
 				}
 				filename := uuid.New() + extension
 				file, err := os.Create(filepath.Dir(path) + r.URL.Path + filename)
 				if err != nil {
-					http.Error(rww, err.Error(), http.StatusInternalServerError)
+					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
 				}
 				defer file.Close()
 
 				size, err := io.Copy(file, r.Body)
 				if err != nil {
-					http.Error(rww, err.Error(), http.StatusInternalServerError)
+					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
 				}
-				rww.Header().Set("Location", r.URL.Path+filename)
+				w.Header().Set("Location", r.URL.Path+filename)
 				successString = fmt.Sprintf("Created: %v, Size: %v bytes\n", filename, size)
 			} else {
-				http.Error(rww, "Need a valid Content-Type header", http.StatusUnsupportedMediaType)
+				http.Error(w, "Need a valid Content-Type header", http.StatusUnsupportedMediaType)
 				return
 			}
 		}
-		rww.WriteHeader(http.StatusCreated)
-		rww.Write([]byte(successString))
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(successString))
 		return
 	}
 
 	if r.Method == "PUT" {
 		if strings.HasSuffix(r.URL.Path, "/") {
-			http.Error(rww, "PUT is allowed on files only", http.StatusNotFound)
+			http.Error(w, "PUT is allowed on files only", http.StatusNotFound)
 			return
 		}
 		//Need to strip the file off the path
@@ -519,22 +525,22 @@ func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		file, err := os.Create(filepath.Dir(path) + r.URL.Path)
 		if err != nil {
-			http.Error(rww, err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		defer file.Close()
 
 		_, err = io.Copy(file, r.Body)
 		if err != nil {
-			http.Error(rww, err.Error(), http.StatusInternalServerError)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		rww.WriteHeader(http.StatusCreated)
+		w.WriteHeader(http.StatusCreated)
 		return
 	}
 
-	m.file.ServeHTTP(rww, r)
+	m.file.ServeHTTP(w, r)
 }
 
 func isGitRequest(path string) bool {
@@ -581,4 +587,60 @@ func readConfig(inconfig map[string]string, path string) (ret map[string]string)
 	}
 
 	return
+}
+
+// Reads a user file, typically .share-users
+// [username]
+// 	password=password
+// 	admin=true
+//func readUsers(path string) (ret map[string]string) {
+//}
+
+// Reads an acl file, typically .share-acl
+// +/- node verb(s) users
+//func readACL(path string) (ret
+
+func scopeFunc(r *http.Request, s string, c heimdall.Client, u heimdall.User) (int, string) {
+	return heimdall.Deny, "Scope not supported in share at this point"
+}
+
+func pepFunc(r *http.Request, t heimdall.Token, c heimdall.Client, u heimdall.User) (int, string) {
+	//Deny any access to */.share*
+	if strings.HasSuffix(r.URL.Path, "/.share") {
+		return heimdall.Deny, "The share file can't be viewed or modified"
+	}
+	if *pushUsername != "" && *pushPassword != "" && *username != "" && *password != "" {
+		//The push user has all privs, and the regular user has read only privs
+		if u != nil && u.GetName() == *pushUsername {
+			return heimdall.Permit, "Welcome admin"
+		}
+		if u != nil && r.Method == "GET" || r.Method == "HEAD" && u.GetName() == *username {
+			return heimdall.Permit, "Welcome user"
+		}
+		return heimdall.Deny, "Access to this site requires auth"
+	} else if *pushUsername != "" && *pushPassword != "" {
+		//Open auth reads, however you need permission to write
+		if r.Method == "GET" || r.Method == "HEAD" {
+			return heimdall.Permit, "Open auth read"
+		} else if u != nil && u.GetName() == *pushUsername {
+			return heimdall.Permit, "Welcome admin"
+		}
+		return heimdall.Deny, "Writes require auth"
+	} else if *username != "" && *password != "" {
+		//The only user has all privs
+		if u != nil && u.GetName() == *username {
+			return heimdall.Permit, "Welcome admin"
+		}
+		return heimdall.Deny, "Access to this site requires auth"
+	}
+	return heimdall.Permit, "This is an open auth share"
+}
+
+func failFunc(w http.ResponseWriter, r *http.Request, status int, message string, t heimdall.Token, c heimdall.Client, u heimdall.User) {
+	if u != nil {
+		w.Header().Set("WWW-Authenticate", `Basic realm="share"`)
+		http.Error(w, message, http.StatusUnauthorized)
+		return
+	}
+	http.Error(w, message, http.StatusForbidden)
 }
