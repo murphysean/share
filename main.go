@@ -3,8 +3,8 @@ package main
 import (
 	"archive/tar"
 	"bufio"
-	"code.google.com/p/go-uuid/uuid"
 	"compress/gzip"
+	"crypto/rand"
 	"crypto/tls"
 	"fmt"
 	"github.com/AaronO/go-git-http"
@@ -48,6 +48,15 @@ const (
 
 	VERSION = "1.4.0"
 )
+
+func GenUUIDv4() string {
+	u := make([]byte, 16)
+	rand.Read(u)
+	//Set the version to 4
+	u[6] = (u[6] | 0x40) & 0x4F
+	u[8] = (u[8] | 0x80) & 0xBF
+	return fmt.Sprintf("%x-%x-%x-%x-%x", u[0:4], u[4:6], u[6:8], u[8:10], u[10:])
+}
 
 var (
 	host         = ""
@@ -260,8 +269,9 @@ func main() {
 		user := hh.DB.NewUser()
 		user.SetId(*username)
 		user.SetName(*username)
-		user.(memdb.User)["username"] = *username
-		user.(memdb.User)["password"] = *password
+		tu := user.(memdb.User)
+		tu.Username = *username
+		tu.Password = *password
 		hh.DB.CreateUser(user)
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "User/Pass Required:")
@@ -271,8 +281,9 @@ func main() {
 			pu := hh.DB.NewUser()
 			pu.SetId(*pushUsername)
 			pu.SetName(*pushUsername)
-			pu.(memdb.User)["username"] = *pushUsername
-			pu.(memdb.User)["password"] = *pushPassword
+			tpu := pu.(memdb.User)
+			tpu.Username = *pushUsername
+			tpu.Password = *pushPassword
 			hh.DB.CreateUser(pu)
 			fmt.Fprintln(os.Stderr, "Write User/Pass Required:")
 			fmt.Fprintln(os.Stderr, "\tPush Username: "+*pushUsername)
@@ -490,7 +501,7 @@ func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, "Content-Type not Understood", http.StatusUnsupportedMediaType)
 					return
 				}
-				filename := uuid.New() + extension
+				filename := GenUUIDv4() + extension
 				file, err := os.Create(filepath.Dir(path) + r.URL.Path + filename)
 				if err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
