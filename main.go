@@ -269,7 +269,7 @@ func main() {
 		user := hh.DB.NewUser()
 		user.SetId(*username)
 		user.SetName(*username)
-		tu := user.(memdb.User)
+		tu := user.(*memdb.User)
 		tu.Username = *username
 		tu.Password = *password
 		hh.DB.CreateUser(user)
@@ -281,7 +281,7 @@ func main() {
 			pu := hh.DB.NewUser()
 			pu.SetId(*pushUsername)
 			pu.SetName(*pushUsername)
-			tpu := pu.(memdb.User)
+			tpu := pu.(*memdb.User)
 			tpu.Username = *pushUsername
 			tpu.Password = *pushPassword
 			hh.DB.CreateUser(pu)
