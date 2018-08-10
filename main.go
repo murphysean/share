@@ -13,7 +13,7 @@ import (
 	"github.com/murphysean/heimdall/memdb"
 	"github.com/murphysean/share/extn"
 	flag "github.com/ogier/pflag"
-	"github.com/russross/blackfriday"
+	"gopkg.in/russross/blackfriday.v2"
 	"io"
 	"io/ioutil"
 	"log"
@@ -46,7 +46,7 @@ const (
 	DEFAULT_FLAG_PUSH_USERNAME = ""
 	DEFAULT_FLAG_PUSH_PASSWORD = ""
 
-	VERSION = "1.4.0"
+	VERSION = "1.4.1"
 )
 
 func GenUUIDv4() string {
@@ -361,28 +361,13 @@ func (m *Middle) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
 		}
-		//Get title
-		title := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1 : strings.LastIndex(r.URL.Path, ".")]
 		//Set up options
-		extensions := 0
-		extensions |= blackfriday.EXTENSION_NO_INTRA_EMPHASIS
-		extensions |= blackfriday.EXTENSION_TABLES
-		extensions |= blackfriday.EXTENSION_FENCED_CODE
-		extensions |= blackfriday.EXTENSION_AUTOLINK
-		extensions |= blackfriday.EXTENSION_STRIKETHROUGH
-		extensions |= blackfriday.EXTENSION_SPACE_HEADERS
-		extensions |= blackfriday.EXTENSION_AUTO_HEADER_IDS
-		extensions |= blackfriday.EXTENSION_HEADER_IDS
-		//Set up flags
-		htmlFlags := 0
-		htmlFlags |= blackfriday.HTML_USE_SMARTYPANTS
-		htmlFlags |= blackfriday.HTML_SMARTYPANTS_FRACTIONS
-		htmlFlags |= blackfriday.HTML_COMPLETE_PAGE
-		//htmlFlags |= blackfriday.HTML_TOC
-		r := blackfriday.HtmlRenderer(htmlFlags, title, "")
-		md := blackfriday.Markdown(b, r, extensions)
+		e := blackfriday.CommonExtensions
+		e = e | blackfriday.Footnotes
+		e = e | blackfriday.DefinitionLists
+		r := blackfriday.Run(b, blackfriday.WithExtensions(e))
 		w.WriteHeader(http.StatusOK)
-		w.Write(md)
+		w.Write(r)
 		return
 	}
 
